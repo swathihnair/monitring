@@ -16,6 +16,7 @@ from PIL import Image
 import io
 import base64
 from dotenv import load_dotenv
+from health_analytics import StrokeDetector, CardiacIndicatorDetector, BehavioralAnalyzer, HealthRiskCalculator
 
 # Load environment variables
 load_dotenv()
@@ -57,6 +58,26 @@ try:
     )
     pose_detector = vision.PoseLandmarker.create_from_options(options)
     
+    # Download face landmarker model if not exists
+    face_model_path = "face_landmarker.task"
+    if not os.path.exists(face_model_path):
+        print("Downloading face landmarker model...")
+        face_url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+        urllib.request.urlretrieve(face_url, face_model_path)
+        print("Face model downloaded successfully")
+    
+    # Create face landmarker
+    face_base_options = python.BaseOptions(model_asset_path=face_model_path)
+    face_options = vision.FaceLandmarkerOptions(
+        base_options=face_base_options,
+        output_face_blendshapes=False,
+        output_facial_transformation_matrixes=False,
+        min_face_detection_confidence=0.5,
+        min_face_presence_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    face_detector = vision.FaceLandmarker.create_from_options(face_options)
+    
     # Pose landmark indices (same as old MediaPipe)
     class PoseLandmark:
         NOSE = 0
@@ -66,10 +87,11 @@ try:
         RIGHT_HIP = 24
     
     mp_pose_landmark = PoseLandmark
-    print("MediaPipe pose detection initialized successfully")
+    print("MediaPipe pose and face detection initialized successfully")
 except Exception as e:
     print(f"Warning: MediaPipe pose detection not available: {e}")
     pose_detector = None
+    face_detector = None
     mp_pose_landmark = None
 
 # Store active WebSocket connections
@@ -108,6 +130,15 @@ class ActivityDetector:
         self.movement_consistency_threshold = 3  # Need 3 consecutive rapid movements
         self.last_seizure_frame = -100  # Track last seizure detection
         self.seizure_cooldown = 10  # Frames between seizure alerts (0.33 seconds at 30fps)
+        self.last_stroke_frame = -100  # Track last stroke alert
+        self.last_cardiac_frame = -100  # Track last cardiac alert
+        self.health_alert_cooldown = 30  # Frames between health alerts (1 second at 30fps)
+        
+        # Initialize health analytics detectors
+        self.stroke_detector = StrokeDetector()
+        self.cardiac_detector = CardiacIndicatorDetector()
+        self.behavioral_analyzer = BehavioralAnalyzer()
+        self.health_calculator = HealthRiskCalculator()
     
     def reset(self):
         """Reset detector state for new video"""
@@ -117,6 +148,8 @@ class ActivityDetector:
         self.breathing_history = []
         self.movement_consistency_buffer = []
         self.last_seizure_frame = -100
+        self.last_stroke_frame = -100
+        self.last_cardiac_frame = -100
         print("Detector state reset for new video")
         
     def detect_fall(self, landmarks):
@@ -385,7 +418,7 @@ class ActivityDetector:
         return False, 0.0
     
     def analyze_frame(self, frame, frame_number=0):
-        """Analyze a single frame for unusual activities"""
+        """Analyze a single frame for unusual activities and health indicators"""
         if pose_detector is None:
             # MediaPipe not available
             return {
@@ -399,7 +432,10 @@ class ActivityDetector:
                 "breathing_rate": 0.0,
                 "breathing_status": "Unknown",
                 "posture_type": "Unknown",
-                "pose_detected": False
+                "pose_detected": False,
+                "stroke_risk": None,
+                "cardiac_risk": None,
+                "health_score": None
             }, frame
             
         # Convert to RGB for MediaPipe
@@ -410,6 +446,14 @@ class ActivityDetector:
         
         # Detect pose
         detection_result = pose_detector.detect(mp_image)
+        
+        # Detect face (for stroke detection)
+        face_result = None
+        if face_detector:
+            try:
+                face_result = face_detector.detect(mp_image)
+            except Exception as e:
+                print(f"Face detection error: {e}")
         
         activities = {
             "fall_detected": False,
@@ -425,7 +469,10 @@ class ActivityDetector:
             "posture_type": "Normal",
             "breathing_rate": 0.0,
             "breathing_status": "Unknown",
-            "pose_detected": False
+            "pose_detected": False,
+            "stroke_risk": None,
+            "cardiac_risk": None,
+            "health_score": None
         }
         
         if detection_result.pose_landmarks:
@@ -472,11 +519,90 @@ class ActivityDetector:
             activities["breathing_rate"] = breathing_rate
             activities["breathing_status"] = breathing_status
             
+            # === ADVANCED HEALTH ANALYTICS ===
+            
+            try:
+                # 7. Stroke Detection
+                facial_asymmetry = False
+                arm_drift = False
+                gait_abnormal = False
+                
+                # Check facial asymmetry if face detected
+                if face_result and face_result.face_landmarks:
+                    face_landmarks = face_result.face_landmarks[0]
+                    facial_asymmetry, asymmetry_score, asymmetry_msg = self.stroke_detector.detect_facial_asymmetry(face_landmarks)
+                    if facial_asymmetry:
+                        print(f"  STROKE INDICATOR: {asymmetry_msg}")
+                
+                # Check arm drift
+                arm_drift, arm_score, arm_msg = self.stroke_detector.detect_arm_drift(landmarks)
+                if arm_drift:
+                    print(f"  STROKE INDICATOR: {arm_msg}")
+                
+                # Check gait abnormalities
+                gait_abnormal, gait_score, gait_msg = self.stroke_detector.detect_gait_abnormalities(landmarks)
+                if gait_abnormal:
+                    print(f"  STROKE INDICATOR: {gait_msg}")
+                
+                # Calculate stroke risk
+                stroke_risk = self.stroke_detector.calculate_stroke_risk_score(
+                    facial_asymmetry, arm_drift, gait_abnormal
+                )
+                activities["stroke_risk"] = stroke_risk
+                
+                # 8. Cardiac Indicators
+                chest_clutching, clutch_distance = self.cardiac_detector.detect_chest_clutching(landmarks)
+                breathing_distress, distress_rate, distress_status = self.cardiac_detector.detect_breathing_distress(landmarks)
+                restlessness, restless_score = self.cardiac_detector.detect_restlessness(landmarks)
+                
+                # Suppress chest clutching if arm drift detected OR if stroke risk is present
+                # (stroke patients have weak arms that may look like clutching)
+                if arm_drift or facial_asymmetry or gait_abnormal:
+                    chest_clutching = False
+                    if chest_clutching:  # This will never print now, but keeping for clarity
+                        print(f"  CARDIAC INDICATOR: Chest clutching suppressed (stroke indicators present)")
+                
+                if chest_clutching:
+                    print(f"  CARDIAC INDICATOR: Chest clutching detected")
+                if breathing_distress:
+                    print(f"  CARDIAC INDICATOR: {distress_status}")
+                if restlessness:
+                    print(f"  CARDIAC INDICATOR: Excessive restlessness")
+                
+                # Calculate cardiac risk (chest clutching will be False if stroke indicators present)
+                cardiac_risk = self.cardiac_detector.calculate_cardiac_risk_score(
+                    chest_clutching, breathing_distress, restlessness, False
+                )
+                activities["cardiac_risk"] = cardiac_risk
+                
+                # 9. Overall Health Score
+                health_score = self.health_calculator.calculate_overall_health_score(
+                    stroke_risk['stroke_risk_score'],
+                    cardiac_risk['cardiac_risk_score'],
+                    False,  # activity_declining (would need longer-term tracking)
+                    False   # poor_sleep (would need longer-term tracking)
+                )
+                activities["health_score"] = health_score
+                
+            except Exception as e:
+                print(f"  Health analytics error: {e}")
+                # Set default values if health analytics fail
+                activities["stroke_risk"] = None
+                activities["cardiac_risk"] = None
+                activities["health_score"] = None
+            
             # Draw pose landmarks on frame (simple circles)
             for landmark in landmarks:
                 x = int(landmark.x * frame.shape[1])
                 y = int(landmark.y * frame.shape[0])
                 cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
+            
+            # Draw face landmarks if available
+            if face_result and face_result.face_landmarks:
+                for face_landmark in face_result.face_landmarks[0]:
+                    x = int(face_landmark.x * frame.shape[1])
+                    y = int(face_landmark.y * frame.shape[0])
+                    cv2.circle(frame, (x, y), 2, (255, 0, 255), -1)
             
             # Draw alerts on frame
             y_offset = 30
@@ -496,6 +622,22 @@ class ActivityDetector:
                 cv2.putText(frame, f"ABNORMAL POSTURE: {posture_type}", (10, y_offset), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
                 y_offset += 40
+            
+            # Display health risk indicators
+            if stroke_risk['risk_level'] in ['HIGH', 'CRITICAL']:
+                cv2.putText(frame, f"STROKE RISK: {stroke_risk['risk_level']}", (10, y_offset), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+                y_offset += 35
+            
+            if cardiac_risk['risk_level'] in ['HIGH', 'CRITICAL']:
+                cv2.putText(frame, f"CARDIAC RISK: {cardiac_risk['risk_level']}", (10, y_offset), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 100, 0), 2)
+                y_offset += 35
+            
+            if health_score['risk_level'] in ['HIGH', 'CRITICAL']:
+                cv2.putText(frame, f"HEALTH SCORE: {health_score['overall_health_score']}/100", (10, y_offset), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                y_offset += 35
             
             # Display breathing rate
             cv2.putText(frame, f"Breathing: {breathing_rate:.1f} bpm ({breathing_status})", 
@@ -662,6 +804,67 @@ async def process_video(filename: str):
                         }
                         alerts.append(alert)
                         await broadcast_alert(alert)
+                
+                # === ADVANCED HEALTH ALERTS ===
+                
+                # Stroke risk alerts - with cooldown
+                if activities.get("stroke_risk"):
+                    stroke_risk = activities["stroke_risk"]
+                    if stroke_risk['risk_level'] in ['HIGH', 'CRITICAL']:
+                        # Apply cooldown
+                        if (frame_count - detector.last_stroke_frame) > detector.health_alert_cooldown:
+                            alert = {
+                                "type": "STROKE_RISK",
+                                "severity": stroke_risk['risk_level'],
+                                "timestamp": timestamp,
+                                "frame": frame_count,
+                                "risk_score": stroke_risk['stroke_risk_score'],
+                                "indicators": stroke_risk['indicators'],
+                                "recommendation": stroke_risk['recommendation'],
+                                "message": f"🧠 STROKE RISK: {stroke_risk['risk_level']} - {', '.join(stroke_risk['indicators'])}"
+                            }
+                            alerts.append(alert)
+                            await broadcast_alert(alert)
+                            detector.last_stroke_frame = frame_count
+                            print(f"ALERT: Stroke risk {stroke_risk['risk_level']} at frame {frame_count}")
+                
+                # Cardiac risk alerts - with cooldown
+                if activities.get("cardiac_risk"):
+                    cardiac_risk = activities["cardiac_risk"]
+                    if cardiac_risk['risk_level'] in ['HIGH', 'CRITICAL']:
+                        # Apply cooldown
+                        if (frame_count - detector.last_cardiac_frame) > detector.health_alert_cooldown:
+                            alert = {
+                                "type": "CARDIAC_RISK",
+                                "severity": cardiac_risk['risk_level'],
+                                "timestamp": timestamp,
+                                "frame": frame_count,
+                                "risk_score": cardiac_risk['cardiac_risk_score'],
+                                "indicators": cardiac_risk['indicators'],
+                                "recommendation": cardiac_risk['recommendation'],
+                                "message": f"❤️ CARDIAC RISK: {cardiac_risk['risk_level']} - {', '.join(cardiac_risk['indicators'])}"
+                            }
+                            alerts.append(alert)
+                            await broadcast_alert(alert)
+                            detector.last_cardiac_frame = frame_count
+                            print(f"ALERT: Cardiac risk {cardiac_risk['risk_level']} at frame {frame_count}")
+                
+                # Overall health deterioration warning
+                if activities.get("health_score"):
+                    health_score = activities["health_score"]
+                    if health_score['risk_level'] in ['HIGH', 'CRITICAL']:
+                        alert = {
+                            "type": "HEALTH_DETERIORATION",
+                            "severity": health_score['risk_level'],
+                            "timestamp": timestamp,
+                            "frame": frame_count,
+                            "health_score": health_score['overall_health_score'],
+                            "action_required": health_score['action_required'],
+                            "message": f"⚕️ HEALTH ALERT: Score {health_score['overall_health_score']}/100 - {health_score['action_required']}"
+                        }
+                        alerts.append(alert)
+                        await broadcast_alert(alert)
+                        print(f"ALERT: Health deterioration {health_score['risk_level']} at frame {frame_count}")
         
         cap.release()
         
@@ -672,6 +875,9 @@ async def process_video(filename: str):
         print(f"  - Bed exits: {len([a for a in alerts if a['type'] == 'BED_EXIT'])}")
         print(f"  - Abnormal postures: {len([a for a in alerts if a['type'] == 'ABNORMAL_POSTURE'])}")
         print(f"  - Breathing alerts: {len([a for a in alerts if a['type'] == 'ABNORMAL_BREATHING'])}")
+        print(f"  - Stroke risks: {len([a for a in alerts if a['type'] == 'STROKE_RISK'])}")
+        print(f"  - Cardiac risks: {len([a for a in alerts if a['type'] == 'CARDIAC_RISK'])}")
+        print(f"  - Health deterioration: {len([a for a in alerts if a['type'] == 'HEALTH_DETERIORATION'])}")
         
         return JSONResponse({
             "success": True,
@@ -684,14 +890,21 @@ async def process_video(filename: str):
                 "bed_exit_count": len([a for a in alerts if a["type"] == "BED_EXIT"]),
                 "abnormal_posture_count": len([a for a in alerts if a["type"] == "ABNORMAL_POSTURE"]),
                 "rapid_movement_count": len([a for a in alerts if a["type"] == "RAPID_MOVEMENT"]),
-                "abnormal_breathing_count": len([a for a in alerts if a["type"] == "ABNORMAL_BREATHING"])
+                "abnormal_breathing_count": len([a for a in alerts if a["type"] == "ABNORMAL_BREATHING"]),
+                "stroke_risk_count": len([a for a in alerts if a["type"] == "STROKE_RISK"]),
+                "cardiac_risk_count": len([a for a in alerts if a["type"] == "CARDIAC_RISK"]),
+                "health_deterioration_count": len([a for a in alerts if a["type"] == "HEALTH_DETERIORATION"])
             }
         })
         
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"ERROR in process_video: {error_details}")
         return JSONResponse({
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "details": error_details
         }, status_code=500)
 
 @app.websocket("/ws/alerts")

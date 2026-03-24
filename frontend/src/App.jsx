@@ -20,6 +20,9 @@ function App() {
     bedExitCount: 0,
     abnormalPostureCount: 0,
     breathingAlertCount: 0,
+    strokeRiskCount: 0,
+    cardiacRiskCount: 0,
+    healthDeteriorationCount: 0,
   });
   const [connectionStatus, setConnectionStatus] = useState('Connecting...');
   const [rooms, setRooms] = useState([
@@ -70,6 +73,9 @@ function App() {
           bedExitCount: alert.type === 'BED_EXIT' ? prev.bedExitCount + 1 : prev.bedExitCount,
           abnormalPostureCount: alert.type === 'ABNORMAL_POSTURE' ? prev.abnormalPostureCount + 1 : prev.abnormalPostureCount,
           breathingAlertCount: alert.type === 'ABNORMAL_BREATHING' ? prev.breathingAlertCount + 1 : prev.breathingAlertCount,
+          strokeRiskCount: alert.type === 'STROKE_RISK' ? prev.strokeRiskCount + 1 : prev.strokeRiskCount,
+          cardiacRiskCount: alert.type === 'CARDIAC_RISK' ? prev.cardiacRiskCount + 1 : prev.cardiacRiskCount,
+          healthDeteriorationCount: alert.type === 'HEALTH_DETERIORATION' ? prev.healthDeteriorationCount + 1 : prev.healthDeteriorationCount,
         }));
 
         // Update room status
@@ -269,6 +275,9 @@ function App() {
         bedExitCount: processResult.summary.bed_exit_count || 0,
         abnormalPostureCount: processResult.summary.abnormal_posture_count || 0,
         breathingAlertCount: processResult.summary.abnormal_breathing_count || 0,
+        strokeRiskCount: processResult.summary.stroke_risk_count || 0,
+        cardiacRiskCount: processResult.summary.cardiac_risk_count || 0,
+        healthDeteriorationCount: processResult.summary.health_deterioration_count || 0,
       });
 
       // Update room status based on alerts
@@ -307,6 +316,9 @@ function App() {
       bedExitCount: 0,
       abnormalPostureCount: 0,
       breathingAlertCount: 0,
+      strokeRiskCount: 0,
+      cardiacRiskCount: 0,
+      healthDeteriorationCount: 0,
     });
   };
 
@@ -535,6 +547,30 @@ function App() {
             <div className="stat-value">{stats.breathingAlertCount}</div>
             <div className="stat-label">Breathing Alerts</div>
           </div>
+
+          <div className="card stat-card">
+            <div className="card-icon" style={{ background: 'linear-gradient(135deg, hsl(340, 80%, 60%), hsl(360, 80%, 60%))' }}>
+              🧠
+            </div>
+            <div className="stat-value">{stats.strokeRiskCount}</div>
+            <div className="stat-label">Stroke Risk</div>
+          </div>
+
+          <div className="card stat-card">
+            <div className="card-icon" style={{ background: 'linear-gradient(135deg, hsl(10, 85%, 60%), hsl(30, 85%, 60%))' }}>
+              ❤️
+            </div>
+            <div className="stat-value">{stats.cardiacRiskCount}</div>
+            <div className="stat-label">Cardiac Risk</div>
+          </div>
+
+          <div className="card stat-card">
+            <div className="card-icon" style={{ background: 'linear-gradient(135deg, hsl(160, 70%, 50%), hsl(180, 70%, 50%))' }}>
+              ⚕️
+            </div>
+            <div className="stat-value">{stats.healthDeteriorationCount}</div>
+            <div className="stat-label">Health Alerts</div>
+          </div>
         </div>
 
         {/* Upload Section */}
@@ -620,7 +656,10 @@ function App() {
                          alert.type === 'SEIZURE' ? '※' :
                          alert.type === 'BED_EXIT' ? '▶' :
                          alert.type === 'ABNORMAL_POSTURE' ? '◈' :
-                         alert.type === 'ABNORMAL_BREATHING' ? '◐' : '⚡'}
+                         alert.type === 'ABNORMAL_BREATHING' ? '◐' :
+                         alert.type === 'STROKE_RISK' ? '🧠' :
+                         alert.type === 'CARDIAC_RISK' ? '❤️' :
+                         alert.type === 'HEALTH_DETERIORATION' ? '⚕️' : '⚡'}
                       </span>
                       <span>{alert.type.replace(/_/g, ' ')}</span>
                     </div>
@@ -646,6 +685,25 @@ function App() {
                     )}
                     {alert.breathing_rate && (
                       <span>🫁 Rate: {alert.breathing_rate.toFixed(1)} bpm ({alert.status})</span>
+                    )}
+                    {alert.risk_score !== undefined && (
+                      <span>📈 Risk Score: {alert.risk_score}/100</span>
+                    )}
+                    {alert.health_score !== undefined && (
+                      <span>🏥 Health Score: {alert.health_score}/100</span>
+                    )}
+                    {alert.indicators && alert.indicators.length > 0 && (
+                      <span>🔍 Indicators: {alert.indicators.join(', ')}</span>
+                    )}
+                    {alert.recommendation && (
+                      <div className="alert-recommendation">
+                        💡 {alert.recommendation}
+                      </div>
+                    )}
+                    {alert.action_required && (
+                      <div className="alert-recommendation">
+                        ⚡ {alert.action_required}
+                      </div>
                     )}
                   </div>
                 </div>
