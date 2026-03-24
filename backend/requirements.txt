@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-multipart
+opencv-python
+mediapipe==0.10.9
+numpy
+websockets
+python-socketio
+aiofiles
+pydantic
+scikit-learn
+google-genai
+pillow
+python-dotenv
